@@ -7,37 +7,63 @@ use crate::parse_error::ParseError;
 pub struct StringEater<'a> {
     pub string: &'a String,
     iterator: Peekable<Chars<'a>>,
-    index: usize,
-    line_number: usize,
-    line_start_indexes: Vec<usize>
+    index: usize
 }
 
 impl<'a> StringEater <'a> {
     pub fn new(string: &'a String) -> StringEater<'a> {
-        StringEater{ string: string, iterator: string.chars().peekable(), index: 0, line_number: 1, line_start_indexes: vec![0] }
+        StringEater{ string: string, iterator: string.chars().peekable(), index: 0 }
     }
 
     pub fn err(&self, string: &'static str) -> ParseError {
-        let offset = match self.line_start_indexes.last() {
-            // Exclude \n
-            Some(index) => {
-                println!("self.index={} index={}", self.index, index);
-                self.index - index
-            },
-            _ => 0
-        };
-
-        ParseError::SyntaxError(self.line_number, offset, string)
+        ParseError::SyntaxError(self.index, string)
     }
 
-    fn _read_line(&self, line_number: usize) -> String {
-        if line_number > self.line_start_indexes.len() {
-            panic!("received line number past read line count");
+    fn _read_line(&self, index: usize) -> (String, usize, usize) {
+        if index > self.string.len() {
+            panic!("received character index past string length");
         }
 
         let mut line = String::new();
-        let mut iter = self.string.chars().skip(self.line_start_indexes[line_number - 1]);
 
+        let mut line_start_index: usize = 0;
+        let mut line_number: usize = 0;
+        
+        // Find line start
+        {
+            let mut iter = self.string.chars();
+            let mut lines: Vec<usize> = Vec::new();
+            let mut c: usize = 0;
+            loop {
+                match iter.next() {
+                    Some('\n') => {
+                        if c > index {
+                            break;
+                        }
+
+                        match iter.next() {
+                            Some(_) => {
+                                c += 1;
+                                lines.push(c);
+                                line_number += 1;
+                            },
+                            _ => return (String::new(), line_number, c)
+                        }
+
+                    },
+                    Some(_) => (),
+                    _ => break
+                }
+                c += 1;
+            }
+
+            if lines.len() > 0 {
+                line_start_index = *lines.last().unwrap();
+            }
+        }
+
+        // Read line
+        let mut iter = self.string.chars().skip(line_start_index);
         let mut read: Option<char>;
         loop {
             read = iter.next();
@@ -54,27 +80,54 @@ impl<'a> StringEater <'a> {
             };
         };
         
-        line
+        (line, line_number, line_start_index)
     }
 
     pub fn print_err(&self, error: &ParseError) {
         match &error {
-            ParseError::SyntaxError(line_number, line_character, string) => {
-                if *line_number > self.line_start_indexes.len() {
-                    panic!("received line number past read line count");
+            ParseError::SyntaxError(index, string) => {
+                if *index > self.string.len() {
+                    panic!("received character index past string length");
                 }
 
                 println!("Syntax error: {}", string);
+                
+                let line: String;
+                let line_number: usize;
+                let line_start_index: usize;
+
+                (line, line_number, line_start_index) = self._read_line(*index);
 
                 let line_number_str = line_number.to_string();
 
-                println!("{} | {}", line_number_str, self._read_line(*line_number));
-                println!("{}^", " ".repeat(line_number_str.len() + 3 + line_character));
+                println!("{} | {}", line_number_str, line);
+                println!("{}^", " ".repeat(line_number_str.len() + 3 + (index - line_start_index)));
             },
             ParseError::UnexpectedEOF => {
                 println!("Unexpected end of file")
             }
         }
+    }
+
+    pub fn backup(&self) -> usize {
+        self.index
+    }
+
+    pub fn restore(&mut self, backup: usize) {
+        self.index = backup;
+        self.iterator = self.string.chars().peekable();
+
+        if backup > 0 {
+            self.iterator.nth(backup-1);
+        }
+    }
+
+    pub fn begin_token(&self) -> (usize, usize) {
+        (self.index, 0)
+    }
+
+    pub fn end_token(&self, token: &mut (usize, usize)) {
+        token.1 = self.index;
     }
 
     pub fn trim(&mut self) -> bool {
@@ -107,11 +160,6 @@ impl<'a> StringEater <'a> {
         match self.iterator.next() {
             Some(c) => {
                 self.index = self.index + 1;
-
-                if c == '\n' {
-                    self.line_number = self.line_number + 1;
-                    self.line_start_indexes.push(self.index);
-                }
 
                 Ok(c)
             },
@@ -246,4 +294,228 @@ impl<'a> StringEater <'a> {
         }
     }
     
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_eater1() {
+        println!("Testing eat(), trim() and next()");
+
+        let string: String = "Hello\n   world!".to_string();
+
+        let mut eater = StringEater::new(&string);
+
+        assert_eq!(eater.eat('H'), true);
+        assert_eq!(eater.eat('e'), true);
+        assert_eq!(eater.eat('l'), true);
+        assert_eq!(eater.eat('l'), true);
+        assert_eq!(eater.eat('a'), false);
+        assert_eq!(eater.eat('o'), true);
+
+        assert_eq!(eater.trim(), true);
+        
+        assert_eq!(eater.eat('w'), true);
+        assert_eq!(eater.eat('o'), true);
+        assert_eq!(eater.eat('r'), true);
+        assert_eq!(eater.eat('l'), true);
+        assert_eq!(eater.eat('d'), true);
+        assert_eq!(eater.eat('!'), true);
+
+        eater.next().expect_err("Expected end of string");
+    }
+
+    #[test]
+    fn test_string_eater2() {
+        println!("Testing _read_line()");
+
+        let string: String = "Hello\n   world  \nto\nyou!".to_string();
+
+        let mut eater = StringEater::new(&string);
+
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+
+        assert_eq!(eater.eat('o'), true);
+
+        // Index points to 'r' in "world"
+        let index = eater.index;
+                
+        let line: String;
+        let line_number: usize;
+        let line_start_index: usize;
+
+        (line, line_number, line_start_index) = eater._read_line(index);
+
+        println!("{}, {}, {}", line, line_number, line_start_index);
+
+        assert_eq!(line, "   world  ");
+    }
+
+    #[test]
+    fn test_string_eater3() {
+        println!("Testing _read_line()");
+
+        let string: String = "Hello\n   world  \nto\nyou!".to_string();
+
+        let mut eater = StringEater::new(&string);
+
+        // Index points to first character
+        let index = eater.index;
+                
+        let line: String;
+        let line_number: usize;
+        let line_start_index: usize;
+
+        (line, line_number, line_start_index) = eater._read_line(index);
+
+        println!("{}, {}, {}", line, line_number, line_start_index);
+
+        assert_eq!(line, "Hello");
+    }
+
+    #[test]
+    fn test_string_eater4() {
+        println!("Testing _read_line()");
+
+        let string: String = "Hello\n   world  \nto\nyou!".to_string();
+
+        let mut eater = StringEater::new(&string);
+
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+
+        assert_eq!(eater.eat('u'), true);
+
+        // Index points to last character
+        let index = eater.index;
+                
+        let line: String;
+        let line_number: usize;
+        let line_start_index: usize;
+
+        (line, line_number, line_start_index) = eater._read_line(index);
+
+        println!("{}, {}, {}", line, line_number, line_start_index);
+
+        assert_eq!(line, "you!");
+    }
+
+    #[test]
+    fn test_string_eater5() {
+        println!("Testing _read_line()");
+
+        let string: String = "Hello\n   world  \nto\nyou!".to_string();
+
+        let mut eater = StringEater::new(&string);
+
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+
+        assert_eq!(eater.eat(' '), true);
+        assert_eq!(eater.eat(' '), true);
+
+        // Index points to '\n' in "\nto"
+        let index = eater.index;
+                
+        let line: String;
+        let line_number: usize;
+        let line_start_index: usize;
+
+        (line, line_number, line_start_index) = eater._read_line(index);
+
+        println!("{}, {}, {}", line, line_number, line_start_index);
+
+        assert_eq!(line, "to");
+    }
+
+    #[test]
+    fn test_string_eater6() {
+        println!("Testing backup() and restore()");
+
+        let string: String = "Hello\n   world  \nto\nyou!".to_string();
+
+        let mut eater = StringEater::new(&string);
+
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+
+        let backup = eater.backup();
+
+        assert_eq!(eater.eat('w'), true);
+
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+        eater.next().expect("Expected character");
+
+        assert_eq!(eater.eat(' '), true);
+        assert_eq!(eater.eat(' '), true);
+
+        eater.restore(backup);
+
+        assert_eq!(eater.eat('w'), true);
+
+        // Index points to 'o' in "world"
+        let index = eater.index;
+                
+        let line: String;
+        let line_number: usize;
+        let line_start_index: usize;
+
+        (line, line_number, line_start_index) = eater._read_line(index);
+
+        println!("{}, {}, {}", line, line_number, line_start_index);
+
+        assert_eq!(line, "   world  ");
+    }
 }

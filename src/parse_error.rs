@@ -1,5 +1,5 @@
 #[derive(Debug)]
 pub enum ParseError {
-    SyntaxError(usize, usize, &'static str),
+    SyntaxError(usize, &'static str),
     UnexpectedEOF
 }
